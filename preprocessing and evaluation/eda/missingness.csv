@@ -1,0 +1,11 @@
+column,missing_share,not_measured_share,action
+weight,0.9685847925633315,0.0,Dropped (> 40% missing)
+medical_specialty,0.49082208203132677,0.0,Dropped (> 40% missing)
+payer_code,0.395574160328597,0.0,Kept; imputed
+race,0.022335554114340742,0.0,Kept; imputed
+diag_3,0.013983059174970029,0.0,Kept; imputed
+diag_2,0.0035178743391702533,0.0,Kept; imputed
+diag_1,0.0002063557573256294,0.0,Kept; imputed
+gender,2.947939390366134e-05,0.0,Kept; imputed
+max_glu_serum,0.0,0.9474677200636755,"Kept; 'None' = test not performed (a category, not missing)"
+A1Cresult,0.0,0.8327732248491637,"Kept; 'None' = test not performed (a category, not missing)"

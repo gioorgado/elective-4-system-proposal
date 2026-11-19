@@ -3,7 +3,13 @@
 import pandas as pd
 import streamlit as st
 
-from model_service import METRICS_PATH, SELECTED_MODEL, load_metrics
+from model_service import (
+    DEFAULT_MODEL_PATH,
+    METRICS_PATH,
+    get_model_bundle,
+    load_metrics,
+    select_best_model,
+)
 
 st.title("User guide", icon=":material/menu_book:")
 st.caption(
@@ -97,11 +103,18 @@ independent validation at another hospital or in current practice.
 
 try:
     metrics = load_metrics(str(METRICS_PATH))
-    selected = metrics.loc[metrics["model"] == SELECTED_MODEL]
+    # Report the model actually deployed; fall back to the evaluation's pick.
+    try:
+        deployed_name = get_model_bundle(str(DEFAULT_MODEL_PATH))["model_name"]
+    except (FileNotFoundError, ValueError, KeyError):
+        deployed_name = str(select_best_model(metrics)["model"])
+    selected = metrics.loc[metrics["model"] == deployed_name]
     if not selected.empty:
         result = selected.iloc[0]
         st.info(
-            f"In the held-out study test set, the selected {SELECTED_MODEL} model "
+            f"The {deployed_name} model was selected because it had the highest "
+            "cross-validated F1 score among the compared models. "
+            f"In the held-out study test set, it "
             f"identified {result['recall_sensitivity']:.0%} of recorded 30-day "
             f"readmissions (sensitivity). Of encounters it flagged, "
             f"{result['precision']:.0%} had a recorded readmission (precision). "
@@ -132,8 +145,8 @@ with st.expander("Technical setup (for project administrators)"):
         language="powershell",
     )
     st.caption(
-        "Place diabetic_data.csv in the preprocesing and evaluation folder. The "
-        "fitted model artifact is stored under models\\xgboost_readmission.joblib. "
-        "To fit it from the training split, run: python -c "
-        "\"from model_service import train_selected_model; train_selected_model()\"."
+        "Place diabetic_data.csv in the preprocessing and evaluation folder. The "
+        "fitted model artifact is stored under models\\readmission_model.joblib. "
+        "To refit the best-evaluated model from the training split, run: python "
+        "\".\\preprocessing and evaluation\\train_final_model.py\"."
     )

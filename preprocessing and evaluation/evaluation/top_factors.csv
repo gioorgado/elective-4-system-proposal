@@ -1,0 +1,52 @@
+rank,variable,factor,mean_abs_shap,share_of_total
+1,discharge_disposition_id,Discharge destination,0.23291355,0.19696362
+2,number_inpatient,Prior-year inpatient visits,0.20196193,0.17078936
+3,has_prior_inpatient_visit,Any prior inpatient visit,0.06951384,0.058784466
+4,total_prior_visits,Total prior-year visits,0.068534166,0.057956
+5,payer_code,Payer code,0.065244995,0.055174507
+6,diag_1_category,Primary diagnosis group,0.055323668,0.046784528
+7,age,Age group,0.05461792,0.04618771
+8,number_diagnoses,Number of diagnoses,0.0517603,0.043771163
+9,num_diabetes_meds_active,Active diabetes medications,0.04403983,0.037242334
+10,time_in_hospital,Length of stay,0.036949217,0.03124615
+11,insulin,insulin,0.030697385,0.025959281
+12,num_medications,Number of medications,0.028368136,0.023989549
+13,diag_2_category,Secondary diagnosis group,0.027117804,0.022932203
+14,num_lab_procedures,Number of lab tests,0.026846612,0.022702869
+15,num_procedures,Number of procedures,0.023826962,0.0201493
+16,number_emergency,Prior-year emergency visits,0.02351134,0.019882394
+17,A1Cresult,A1C result,0.022105055,0.018693166
+18,diag_3_category,Additional diagnosis group,0.018948916,0.016024174
+19,admission_source_id,Admission source,0.014985968,0.012672902
+20,metformin,metformin,0.013612054,0.01151105
+21,admission_type_id,Admission type,0.012907924,0.010915602
+22,insulin_treatment_changed,Insulin dose changed,0.011866488,0.0100349095
+23,number_outpatient,Prior-year outpatient visits,0.007996623,0.006762354
+24,glipizide,glipizide,0.005724834,0.0048412126
+25,race,Race,0.0053995727,0.0045661554
+26,glimepiride,glimepiride,0.004628267,0.0039139
+27,medication_change_count,Diabetes medications changed,0.0045395875,0.0038389077
+28,gender,Sex,0.0040086424,0.0033899134
+29,diabetesMed,Diabetes medication prescribed,0.0037968392,0.0032108016
+30,has_prior_emergency_visit,Any prior emergency visit,0.002968933,0.0025106817
+31,glyburide,glyburide,0.002719929,0.0023001113
+32,max_glu_serum,Max serum glucose result,0.0013374719,0.0011310347
+33,repaglinide,repaglinide,0.0012620041,0.0010672153
+34,change,Any medication change,0.00057316886,0.00048470093
+35,pioglitazone,pioglitazone,0.00054410135,0.00046011998
+36,rosiglitazone,rosiglitazone,0.00051149534,0.00043254666
+37,acarbose,acarbose,0.00048269582,0.0004081923
+38,glyburide-metformin,glyburide-metformin,0.00019361303,0.0001637291
+39,nateglinide,nateglinide,0.00017879286,0.00015119641
+40,acetohexamide,acetohexamide,0.0,0.0
+41,examide,examide,0.0,0.0
+42,citoglipton,citoglipton,0.0,0.0
+43,chlorpropamide,chlorpropamide,0.0,0.0
+44,glimepiride-pioglitazone,glimepiride-pioglitazone,0.0,0.0
+45,metformin-rosiglitazone,metformin-rosiglitazone,0.0,0.0
+46,metformin-pioglitazone,metformin-pioglitazone,0.0,0.0
+47,glipizide-metformin,glipizide-metformin,0.0,0.0
+48,miglitol,miglitol,0.0,0.0
+49,tolazamide,tolazamide,0.0,0.0
+50,tolbutamide,tolbutamide,0.0,0.0
+51,troglitazone,troglitazone,0.0,0.0

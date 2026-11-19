@@ -1,0 +1,48 @@
+grouping,group,encounters,readmission_rate
+Age group,[0-10),160,0.01875
+Age group,[10-20),690,0.057971014492753624
+Age group,[20-30),1649,0.14311704063068525
+Age group,[30-40),3764,0.1126461211477152
+Age group,[40-50),9607,0.10658894556052878
+Age group,[50-60),17060,0.09771395076201642
+Age group,[60-70),22059,0.11301509587923296
+Age group,[70-80),25331,0.12056373613359125
+Age group,[80-90),16434,0.12565413167822806
+Age group,[90-100),2589,0.11896485129393589
+Admission type,Elective,18668,0.10488536533104778
+Admission type,Emergency,52371,0.11827156250596704
+Admission type,Newborn,10,0.1
+Admission type,Not available,4617,0.10677929391379684
+Admission type,Not mapped,320,0.084375
+Admission type,Not recorded,5207,0.11196466295371615
+Admission type,Trauma center,18,0.0
+Admission type,Urgent,18132,0.11350099272005294
+Discharge destination,Home,60234,0.09300395125676528
+Discharge destination,Home health,12902,0.12695706092078748
+Discharge destination,Inpatient rehab,1993,0.2769693928750627
+Discharge destination,Not available,3691,0.12435654294229206
+Discharge destination,Not mapped,989,0.09302325581395349
+Discharge destination,Other,2268,0.14814814814814814
+Discharge destination,Other inpatient,1184,0.20861486486486486
+Discharge destination,Short-term hospital,2128,0.16071428571428573
+Discharge destination,Skilled nursing,13954,0.14662462376379531
+Prior-year inpatient visits,0,66245,0.08589327496414824
+Prior-year inpatient visits,1,18984,0.13253265908133166
+Prior-year inpatient visits,2,7300,0.17931506849315068
+Prior-year inpatient visits,3,3271,0.21033323142769794
+Prior-year inpatient visits,4,1574,0.241423125794155
+Prior-year inpatient visits,5+,1969,0.3712544438801422
+A1C result,>7,3775,0.1014569536423841
+A1C result,>8,8137,0.09942239154479537
+A1C result,None,82509,0.11684785902144008
+A1C result,Norm,4922,0.09772450223486388
+Primary diagnosis group,Circulatory,29585,0.11691735676863275
+Primary diagnosis group,Diabetes,8661,0.1310472231843898
+Primary diagnosis group,Digestive,9072,0.10593033509700177
+Primary diagnosis group,Genitourinary,4963,0.11001410437235543
+Primary diagnosis group,Injury,6853,0.12403327010068584
+Primary diagnosis group,Missing,20,0.25
+Primary diagnosis group,Musculoskeletal,4935,0.09544072948328268
+Primary diagnosis group,Neoplasms,3131,0.10891089108910891
+Primary diagnosis group,Other,22204,0.1096198883084129
+Primary diagnosis group,Respiratory,9919,0.1121080754108277

@@ -1,0 +1,6 @@
+outcome,count,level,share
+NO,54864,original,0.5391191557101586
+>30,35545,original,0.3492816854352141
+<30,11357,original,0.11159915885462728
+Not within 30 days (0),90409,binary target,0.8884008411453728
+Readmitted <30 days (1),11357,binary target,0.11159915885462728
