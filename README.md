@@ -1,8 +1,8 @@
 # Diabetes 30-day readmission risk dashboard
 
 A research prototype for exploring the UCI Diabetes 130-US Hospitals dataset.
-It cleans the cohort, evaluates grouped classifiers, fits the selected
-XGBoost pipeline, and serves a simplified healthcare-staff interface with
+It cleans the cohort, compares Logistic Regression, Random Forest and XGBoost,
+deploys whichever model scores best in cross-validation, and serves a simplified healthcare-staff interface with
 historical cohort patterns, a discharge-time research estimate, and user guidance.
 
 ## Run locally
@@ -15,34 +15,50 @@ python -m pip install -r requirements.txt
 streamlit run .\streamlit_app.py
 ```
 
-Place `diabetic_data.csv` in the `preprocesing and evaluation` folder. If the
+Place `diabetic_data.csv` in the `preprocessing and evaluation` folder. If the
 model artifact is missing, fit it from the patient-grouped training partition:
 
 ```powershell
-python -c "from model_service import train_selected_model; train_selected_model()"
+python ".\preprocessing and evaluation\train_final_model.py"
 ```
 
-Training uses the selected XGBoost parameters in
-`preprocesing and evaluation\evaluation\model_metrics.csv` and saves the pipeline to
-`models\xgboost_readmission.joblib`.
+Training reads `preprocessing and evaluation\evaluation\model_metrics.csv`, picks
+the model with the highest nested-CV validation F1 (test metrics are never used
+for selection), refits it with its tuned parameters and threshold, and saves the
+pipeline to `models\readmission_model.joblib`. Re-running the evaluation and
+then this step is all it takes to switch the app to a different winning model.
 
-The `preprocesing and evaluation` folder contains the source dataset,
+The `preprocessing and evaluation` folder contains the source dataset,
 feature-engineering and evaluation scripts, generated train/test splits, and
-evaluation metrics and plots. The fitted inference model remains in `models`.
+evaluation metrics and plots; its own README walks through each step. The
+fitted inference model remains in `models`.
 
-To re-run data preparation and model evaluation:
+To re-run the full analysis pipeline, in order (the model comparison in step 3
+takes several hours on an 8-core machine):
 
 ```powershell
-python ".\preprocesing and evaluation\data_preparation.py" --input ".\preprocesing and evaluation\diabetic_data.csv" --output-dir ".\preprocesing and evaluation\processed"
-python ".\preprocesing and evaluation\model_evaluation.py" --input ".\preprocesing and evaluation\diabetic_data.csv" --output-dir ".\preprocesing and evaluation\evaluation" --folds 2
+# 1. Exploratory data analysis -> preprocessing and evaluation\eda
+python ".\preprocessing and evaluation\exploratory_analysis.py"
+# 2. Cleaning, feature engineering, patient-grouped split -> processed\
+python ".\preprocessing and evaluation\data_preparation.py"
+# 3. Model comparison (randomized search, 5-fold grouped CV) -> evaluation\
+python ".\preprocessing and evaluation\model_evaluation.py"
+# 4. Refit the best-evaluated model with its tuned parameters and threshold
+python ".\preprocessing and evaluation\train_final_model.py"
+# 5. Global SHAP ranking of top clinical factors -> evaluation\top_factors.csv
+python ".\preprocessing and evaluation\feature_importance.py"
 ```
 
-The evaluation report is a single patient-grouped train/test experiment with
-two-fold grouped tuning for the saved results. Increase `--folds` for a more
-thorough but slower comparison. Thresholds are selected from training-fold
-out-of-fold predictions; the test set is held out for final reporting.
+The evaluation is a single patient-grouped 80/20 train/test experiment.
+Hyperparameters are tuned with randomized search (`--n-iter`, default 12
+candidates per model) using stratified, patient-grouped five-fold CV
+(`--folds`). Thresholds are selected from nested out-of-fold training
+predictions; the test set is used once for final reporting.
 Add `--include-smote` to include additional SMOTE-in-CV candidates; resampling
 is contained within each training fold.
+
+In `A1Cresult` and `max_glu_serum`, the source value `None` means the test was
+not performed. It is kept as its own category, not treated as missing.
 
 ## Pages
 

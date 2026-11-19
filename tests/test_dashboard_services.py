@@ -1,17 +1,20 @@
+import numpy as np
 import pandas as pd
+import pytest
 
-from cohort_dashboard import (
-    NO_SECOND_VISUALIZATION,
-    available_visualizations,
-    selected_visualizations,
-    summarize_cohort,
-)
 from model_service import (
+    _build_pipeline,
     ADMISSION_TYPE_LABELS,
     DISCHARGE_DESTINATION_LABELS,
+    NO_SECOND_VISUALIZATION,
+    available_visualizations,
     explain_factor_names,
+    explain_local,
     make_prediction_row,
     prepare_data,
+    select_best_model,
+    selected_visualizations,
+    summarize_cohort,
 )
 
 
@@ -163,3 +166,97 @@ def test_visualization_dropdowns_allow_one_or_two_distinct_charts():
         "Readmission rate",
         "Encounter volume",
     ]
+
+
+def test_lab_result_none_is_a_category_not_missing(tmp_path):
+    """'None' in A1Cresult/max_glu_serum means 'not measured' and must be kept."""
+    from data_preparation import load_data
+
+    csv_path = tmp_path / "sample.csv"
+    pd.DataFrame(
+        {
+            "patient_nbr": [1, 2, 3, 4],
+            "readmitted": ["<30", "NO", ">30", "NO"],
+            "discharge_disposition_id": [1, 1, 1, 1],
+            "A1Cresult": ["None", "None", "None", ">8"],
+            "max_glu_serum": ["None", "None", "None", "Norm"],
+            "weight": ["?", "?", "?", "[50-75)"],
+        }
+    ).to_csv(csv_path, index=False)
+
+    prepared = prepare_data(load_data(csv_path))
+
+    assert prepared["A1Cresult"].tolist() == ["None", "None", "None", ">8"]
+    assert prepared["max_glu_serum"].tolist() == ["None", "None", "None", "Norm"]
+    assert "weight" not in prepared
+
+
+def test_blank_lab_results_are_treated_as_not_measured():
+    raw = pd.DataFrame(
+        {
+            "patient_nbr": [1, 2],
+            "readmitted": ["<30", "NO"],
+            "discharge_disposition_id": [1, 1],
+            "A1Cresult": [float("nan"), ">7"],
+        }
+    )
+
+    prepared = prepare_data(raw)
+
+    assert prepared["A1Cresult"].tolist() == ["None", ">7"]
+
+
+def test_best_model_is_chosen_by_validation_f1_not_test_f1():
+    metrics = pd.DataFrame(
+        {
+            "model": ["XGBoost", "Logistic Regression", "Random Forest"],
+            "validation_f1": [0.27, 0.29, 0.28],
+            "f1_score": [0.40, 0.20, 0.30],  # test F1 must not drive selection
+        }
+    )
+    assert select_best_model(metrics)["model"] == "Logistic Regression"
+
+
+@pytest.mark.parametrize(
+    ("model_name", "params"),
+    [
+        ("Logistic Regression", {"C": 1.0, "penalty": "l1"}),
+        ("Random Forest", {"n_estimators": 20, "max_depth": 4}),
+        ("XGBoost", {"n_estimators": 20, "max_depth": 3}),
+    ],
+)
+def test_explanations_add_up_to_the_score_the_model_actually_gives(
+    model_name, params
+):
+    # Many one-hot levels make the preprocessor emit a sparse matrix, the case
+    # where densifying before SHAP silently explained the wrong inputs.
+    rng = np.random.default_rng(0)
+    x = pd.DataFrame(
+        {
+            "number_inpatient": rng.integers(0, 5, 300),
+            "payer_code": rng.choice([f"P{i}" for i in range(20)], 300),
+            "insulin": rng.choice(["No", "Steady", "Up"], 300),
+        }
+    )
+    y = pd.Series((x["number_inpatient"] + rng.normal(0, 1, 300) > 2).astype(int))
+    pipeline = _build_pipeline(model_name, params, x).fit(x, y)
+    preprocessor = pipeline.named_steps["preprocessor"]
+    background = preprocessor.transform(x.head(50))
+    if hasattr(background, "toarray"):
+        background = background.toarray()
+    bundle = {"pipeline": pipeline, "shap_background": background}
+
+    rows = x.tail(5)
+    classifier = pipeline.named_steps["classifier"]
+    encoded = preprocessor.transform(rows)
+    if model_name == "XGBoost":
+        expected = classifier.predict(encoded, output_margin=True)
+    elif model_name == "Random Forest":
+        expected = classifier.predict_proba(encoded)[:, 1]
+    else:
+        expected = classifier.decision_function(encoded)
+
+    for position in range(len(rows)):
+        explanation = explain_local(bundle, rows.iloc[[position]])
+        reconstructed = explanation.values.sum() + explanation.base_values
+        assert reconstructed == pytest.approx(expected[position], abs=1e-4)

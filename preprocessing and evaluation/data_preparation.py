@@ -1,9 +1,9 @@
 """Clean and engineer the UCI Diabetes 130-US Hospitals dataset.
 
 Example:
-    python "preprocesing and evaluation/data_preparation.py"
-        --input "preprocesing and evaluation/diabetic_data.csv"
-        --output-dir "preprocesing and evaluation/processed"
+    python "preprocessing and evaluation/data_preparation.py"
+        --input "preprocessing and evaluation/diabetic_data.csv"
+        --output-dir "preprocessing and evaluation/processed"
 
 The script writes patient-grouped train/test CSV files. Patient identifiers are
 used only to create the split and are never included in the exported features.
@@ -89,19 +89,41 @@ CONTINUOUS_COLUMNS = [
 
 MISSING_TOKENS = {"?", "Unknown/Invalid"}
 
+# In these lab-result columns the source value "None" means "test not
+# performed". That is a real clinical category (Strack et al., 2014), not a
+# missing value, so it must never count toward the missingness threshold.
+LAB_RESULT_COLUMNS = ["A1Cresult", "max_glu_serum"]
+LAB_NOT_MEASURED = "None"
+
 
 def load_data(input_path: str | Path) -> pd.DataFrame:
-    """Load the original comma-separated UCI dataset."""
+    """Load the original comma-separated UCI dataset.
+
+    pandas treats the literal string "None" as NaN by default, which would turn
+    "test not performed" into missing data. Only "?" is a missing marker here.
+    """
     path = Path(input_path)
     if not path.is_file():
         raise FileNotFoundError(f"Dataset file not found: {path}")
-    return pd.read_csv(path, low_memory=False)
+    return pd.read_csv(
+        path,
+        low_memory=False,
+        keep_default_na=False,
+        na_values=["?", ""],
+    )
 
 
 def normalize_missing_values(data: pd.DataFrame) -> pd.DataFrame:
-    """Replace the dataset's string placeholders with real missing values."""
-    cleaned = data.copy()
-    return cleaned.replace(list(MISSING_TOKENS), np.nan)
+    """Replace the dataset's string placeholders with real missing values.
+
+    Lab-result columns are filled with the explicit "not measured" category so
+    that copies of the dataset that store it as blank behave the same way.
+    """
+    cleaned = data.copy().replace(list(MISSING_TOKENS), np.nan)
+    for column in LAB_RESULT_COLUMNS:
+        if column in cleaned.columns:
+            cleaned[column] = cleaned[column].fillna(LAB_NOT_MEASURED).astype(str)
+    return cleaned
 
 
 def map_readmission_target(data: pd.DataFrame) -> pd.DataFrame:
@@ -404,12 +426,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
-        default=str(Path("preprocesing and evaluation") / "diabetic_data.csv"),
+        default=str(Path("preprocessing and evaluation") / "diabetic_data.csv"),
         help="Path to the original UCI diabetic_data.csv file.",
     )
     parser.add_argument(
         "--output-dir",
-        default=str(Path("preprocesing and evaluation") / "processed"),
+        default=str(Path("preprocessing and evaluation") / "processed"),
         help="Directory for patient-grouped train.csv and test.csv.",
     )
     parser.add_argument(

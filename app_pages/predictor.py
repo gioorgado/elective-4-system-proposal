@@ -2,24 +2,309 @@
 
 from datetime import datetime, timezone
 
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-from cohort_dashboard import render_cohort_overview
 from model_service import (
     ADMISSION_SOURCE_LABELS,
     ADMISSION_TYPE_LABELS,
     AGE_CATEGORIES,
+    COHORT_GROUPS,
     DEFAULT_DATASET_PATH,
+    DEFAULT_VISUALIZATIONS,
     DEFAULT_MODEL_PATH,
     DIABETES_MEDICATIONS,
     DIAGNOSIS_GROUP_LABELS,
     DISCHARGE_DESTINATION_LABELS,
+    NO_SECOND_VISUALIZATION,
+    available_visualizations,
     explain_factor_names,
     explain_local,
     get_model_bundle,
     load_prepared_cohort,
     make_prediction_row,
+    selected_visualizations,
+    summarize_cohort,
 )
+
+FIRST_VISUALIZATION_KEY = "cohort_visualization_1"
+SECOND_VISUALIZATION_KEY = "cohort_visualization_2"
+
+
+def _update_visualizations_for_group() -> None:
+    """Keep both chart selectors valid when the cohort group changes."""
+    group_name = st.session_state["cohort_group"]
+    allowed_visualizations = available_visualizations(group_name)
+    first = st.session_state.get(FIRST_VISUALIZATION_KEY)
+    if first not in allowed_visualizations:
+        first = DEFAULT_VISUALIZATIONS[0]
+        st.session_state[FIRST_VISUALIZATION_KEY] = first
+
+    second = st.session_state.get(SECOND_VISUALIZATION_KEY)
+    if second not in allowed_visualizations or second == first:
+        second = next(
+            (
+                visualization
+                for visualization in DEFAULT_VISUALIZATIONS
+                if visualization != first and visualization in allowed_visualizations
+            ),
+            NO_SECOND_VISUALIZATION,
+        )
+        st.session_state[SECOND_VISUALIZATION_KEY] = second
+
+
+def _update_second_visualization() -> None:
+    """Prevent duplicate charts when the first visualization changes."""
+    first = st.session_state[FIRST_VISUALIZATION_KEY]
+    second = st.session_state.get(SECOND_VISUALIZATION_KEY)
+    if second == first:
+        st.session_state[SECOND_VISUALIZATION_KEY] = NO_SECOND_VISUALIZATION
+
+
+def _build_cohort_figure(
+    summary: pd.DataFrame,
+    group_name: str,
+    visualization: str,
+    total_encounters: int,
+    readmissions: int,
+) -> tuple[object, str]:
+    """Build one cohort visualization and its accessible description."""
+    category_order = summary["group"].tolist()
+    if visualization == "Readmission rate trend (line)":
+        figure = px.line(
+            summary,
+            x="group",
+            y="readmission_rate",
+            markers=True,
+            hover_data={
+                "encounters": ":,",
+                "readmissions": ":,",
+                "readmission_rate": ":.1%",
+            },
+            category_orders={"group": category_order},
+            labels={
+                "group": group_name,
+                "readmission_rate": "Readmitted within 30 days",
+            },
+        )
+        figure.update_yaxes(tickformat=".0%")
+        alt = f"30-day readmission rate trend across {group_name.lower()} groups"
+    elif visualization == "Encounter mix (donut)":
+        outcome_summary = pd.DataFrame(
+            {
+                "outcome": [
+                    "Readmitted within 30 days",
+                    "No readmission within 30 days",
+                ],
+                "encounters": [readmissions, total_encounters - readmissions],
+            }
+        )
+        figure = px.pie(
+            outcome_summary,
+            names="outcome",
+            values="encounters",
+            hole=0.58,
+            hover_data={"encounters": ":,"},
+            labels={"outcome": "Encounter outcome"},
+        )
+        figure.update_traces(textinfo="percent+label")
+        alt = "Overall cohort split between 30-day readmissions and other encounters"
+    elif visualization == "Readmission rate":
+        figure = px.bar(
+            summary,
+            x="group",
+            y="readmission_rate",
+            hover_data={
+                "encounters": ":,",
+                "readmissions": ":,",
+                "readmission_rate": ":.1%",
+            },
+            category_orders={"group": category_order},
+            labels={
+                "group": group_name,
+                "readmission_rate": "Readmitted within 30 days",
+            },
+        )
+        figure.update_yaxes(tickformat=".0%")
+        alt = f"Observed 30-day readmission rate by {group_name.lower()}"
+    elif visualization == "Encounter volume":
+        figure = px.bar(
+            summary,
+            x="group",
+            y="encounters",
+            hover_data={
+                "readmissions": ":,",
+                "readmission_rate": ":.1%",
+            },
+            category_orders={"group": category_order},
+            labels={"group": group_name, "encounters": "Study encounters"},
+        )
+        alt = f"Number of study encounters by {group_name.lower()}"
+    else:
+        outcome_summary = summary.melt(
+            id_vars=["group", "encounters", "readmission_rate"],
+            value_vars=["readmissions", "not_readmitted"],
+            var_name="outcome",
+            value_name="encounter_count",
+        )
+        outcome_labels = {
+            "readmissions": "Readmitted within 30 days",
+            "not_readmitted": "No readmission within 30 days",
+        }
+        outcome_summary["outcome"] = outcome_summary["outcome"].map(outcome_labels)
+
+        if visualization == "Outcome proportions":
+            outcome_summary["proportion"] = (
+                outcome_summary["encounter_count"] / outcome_summary["encounters"]
+            )
+            y_column = "proportion"
+            y_label = "Share of encounters"
+            figure = px.bar(
+                outcome_summary,
+                x="group",
+                y=y_column,
+                color="outcome",
+                barmode="stack",
+                hover_data={
+                    "encounters": ":,",
+                    "encounter_count": ":,",
+                    "proportion": ":.1%",
+                },
+                category_orders={
+                    "group": category_order,
+                    "outcome": list(outcome_labels.values()),
+                },
+                labels={
+                    "group": group_name,
+                    "outcome": "Encounter outcome",
+                    y_column: y_label,
+                },
+            )
+            figure.update_yaxes(tickformat=".0%")
+            alt = f"Proportion of readmitted and other encounters by {group_name.lower()}"
+        else:
+            y_column = "encounter_count"
+            figure = px.bar(
+                outcome_summary,
+                x="group",
+                y=y_column,
+                color="outcome",
+                barmode="stack",
+                hover_data={
+                    "encounters": ":,",
+                    "encounter_count": ":,",
+                    "readmission_rate": ":.1%",
+                },
+                category_orders={
+                    "group": category_order,
+                    "outcome": list(outcome_labels.values()),
+                },
+                labels={
+                    "group": group_name,
+                    "outcome": "Encounter outcome",
+                    y_column: "Study encounters",
+                },
+            )
+            alt = f"Encounter outcome counts by {group_name.lower()}"
+
+    figure.update_xaxes(tickangle=-25)
+    return figure, alt
+
+
+def render_cohort_overview(cohort: pd.DataFrame) -> None:
+    """Render cohort metrics and 2–3 interactive descriptive visualizations."""
+    st.header("Cohort overview", icon=":material/bar_chart:")
+    st.caption(
+        "Historical patterns in the study dataset. These group-level summaries "
+        "describe the cohort; they do not estimate an individual patient's risk."
+    )
+    total_encounters = len(cohort)
+    readmissions = int(cohort["readmitted_30d"].sum())
+    with st.container(horizontal=True):
+        st.metric("Study encounters", f"{total_encounters:,}", border=True)
+        st.metric("Readmitted within 30 days", f"{readmissions:,}", border=True)
+        st.metric(
+            "Overall cohort rate",
+            f"{cohort['readmitted_30d'].mean():.1%}",
+            border=True,
+        )
+
+    st.session_state.setdefault(FIRST_VISUALIZATION_KEY, DEFAULT_VISUALIZATIONS[0])
+    st.session_state.setdefault(SECOND_VISUALIZATION_KEY, DEFAULT_VISUALIZATIONS[1])
+    group_column, first_column, second_column = st.columns([1.25, 1, 1])
+    with group_column:
+        group_name = st.selectbox(
+            "Group encounters by",
+            list(COHORT_GROUPS),
+            key="cohort_group",
+            on_change=_update_visualizations_for_group,
+        )
+    visualization_options = available_visualizations(group_name)
+    with first_column:
+        first_visualization = st.selectbox(
+            "Visualization 1",
+            visualization_options,
+            key=FIRST_VISUALIZATION_KEY,
+            on_change=_update_second_visualization,
+        )
+    with second_column:
+        second_options = [
+            NO_SECOND_VISUALIZATION,
+            *(
+                visualization
+                for visualization in visualization_options
+                if visualization != first_visualization
+            ),
+        ]
+        second_visualization = st.selectbox(
+            "Visualization 2 (optional)",
+            second_options,
+            key=SECOND_VISUALIZATION_KEY,
+        )
+    visualizations = selected_visualizations(
+        first_visualization,
+        second_visualization,
+    )
+    summary = summarize_cohort(cohort, group_name)
+
+    columns = st.columns(len(visualizations))
+    for column, visualization in zip(columns, visualizations):
+        with column:
+            st.subheader(visualization)
+            figure, alt = _build_cohort_figure(
+                summary,
+                group_name,
+                visualization,
+                total_encounters,
+                readmissions,
+            )
+            st.plotly_chart(figure, width="stretch", alt=alt)
+
+    st.caption(
+        "Rates are unadjusted. Differences between groups do not show cause and effect."
+    )
+
+    if st.toggle("Show cohort summary table", key="show_cohort_summary"):
+        table = summary.rename(
+            columns={
+                "group": group_name,
+                "encounters": "Study encounters",
+                "readmissions": "Readmitted within 30 days",
+                "not_readmitted": "No readmission within 30 days",
+                "readmission_rate": "Readmission rate",
+            }
+        )
+        table["Readmission rate"] = table["Readmission rate"].map(
+            lambda value: f"{value:.1%}"
+        )
+        st.dataframe(
+            table,
+            hide_index=True,
+            alt=f"Readmission summary by {group_name.lower()}",
+        )
+
+
 
 st.title("30-day readmission risk assessment", icon=":material/health_and_safety:")
 st.caption(
@@ -30,7 +315,7 @@ st.caption(
 if not DEFAULT_DATASET_PATH.is_file():
     st.error(
         f"Study dataset not found at {DEFAULT_DATASET_PATH}. Place "
-        "diabetic_data.csv in the preprocesing and evaluation folder."
+        "diabetic_data.csv in the preprocessing and evaluation folder."
     )
     st.stop()
 
@@ -115,7 +400,7 @@ with st.form("patient_risk_form"):
             "A1C result",
             ["None", "Norm", ">7", ">8"],
             format_func=lambda value: {
-                "None": "Not recorded",
+                "None": "Not measured",
                 "Norm": "Within reference range",
                 ">7": "Above 7%",
                 ">8": "Above 8%",
@@ -125,7 +410,7 @@ with st.form("patient_risk_form"):
             "Highest serum glucose result",
             ["None", "Norm", ">200", ">300"],
             format_func=lambda value: {
-                "None": "Not recorded",
+                "None": "Not measured",
                 "Norm": "Within reference range",
                 ">200": "Above 200 mg/dL",
                 ">300": "Above 300 mg/dL",

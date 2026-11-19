@@ -1,0 +1,12 @@
+item,value
+Raw encounters,101766
+Raw columns,50
+Unique patients,71518
+Patients with more than one encounter,16773
+Max encounters for one patient,40
+Duplicate encounter_id values,0
+Fully duplicated rows (ignoring encounter_id),0
+Excluded: died or hospice discharge,2423
+Encounters after cleaning,99343
+Columns after cleaning and feature engineering,53
+30-day readmission rate after cleaning,11.39%

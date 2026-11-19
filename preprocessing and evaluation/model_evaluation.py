@@ -1,11 +1,12 @@
 """Patient-grouped model comparison for the UCI diabetes readmission dataset.
 
 Run from the project directory:
-    python "preprocesing and evaluation/model_evaluation.py"
-        --input "preprocesing and evaluation/diabetic_data.csv"
-        --output-dir "preprocesing and evaluation/evaluation"
+    python "preprocessing and evaluation/model_evaluation.py"
+        --input "preprocessing and evaluation/diabetic_data.csv"
+        --output-dir "preprocessing and evaluation/evaluation"
 
-Hyperparameters are selected by grouped cross-validation on the training set.
+Hyperparameters are selected by randomized search with stratified,
+patient-grouped five-fold cross-validation on the training set.
 An outer grouped CV loop creates out-of-fold training probabilities for threshold
 tuning; the held-out patient-group test set is used only for final evaluation.
 """
@@ -41,8 +42,8 @@ from sklearn.metrics import (
     roc_curve,
 )
 from sklearn.model_selection import (
-    GridSearchCV,
     GroupShuffleSplit,
+    RandomizedSearchCV,
     StratifiedGroupKFold,
 )
 from sklearn.pipeline import Pipeline
@@ -55,6 +56,9 @@ from data_preparation import (
     load_data,
     prepare_data,
 )
+
+# Number of randomized-search candidates per model (overridable with --n-iter).
+N_ITER = 12
 
 
 @dataclass
@@ -70,72 +74,100 @@ class ModelResult:
     best_params: dict[str, Any]
 
 
+# Base estimators shared by the evaluation and the deployed app, so the model
+# served in the dashboard is configured exactly like the one that was compared.
+MODEL_NAMES = ("Logistic Regression", "Random Forest", "XGBoost")
+NEEDS_SCALING = {"Logistic Regression": True, "Random Forest": False, "XGBoost": False}
+
+
+def make_classifier(name: str, random_state: int = 42, n_jobs: int = 1) -> Any:
+    """Return the untuned base estimator for one of the compared models."""
+    if name == "Logistic Regression":
+        return LogisticRegression(
+            solver="liblinear",
+            max_iter=2000,
+            random_state=random_state,
+        )
+    if name == "Random Forest":
+        return RandomForestClassifier(
+            n_estimators=200,
+            class_weight="balanced_subsample",
+            n_jobs=n_jobs,
+            random_state=random_state,
+        )
+    if name == "XGBoost":
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:
+            raise RuntimeError(
+                "XGBoost is required for the requested three-model comparison. "
+                "Install it with: python -m pip install xgboost"
+            ) from exc
+        return XGBClassifier(
+            n_estimators=200,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric="logloss",
+            tree_method="hist",
+            n_jobs=n_jobs,
+            random_state=random_state,
+        )
+    raise ValueError(f"Unknown model: {name!r}. Expected one of {MODEL_NAMES}.")
+
+
 def _make_candidates(
     feature_frame: pd.DataFrame,
     positive_weight: float,
     include_smote: bool,
     random_state: int,
 ) -> list[tuple[str, Pipeline, list[dict[str, list[Any]]]]]:
-    """Create model pipelines and compact grids for grouped CV."""
-    try:
-        from xgboost import XGBClassifier
-    except ImportError as exc:
-        raise RuntimeError(
-            "XGBoost is required for the requested three-model comparison. "
-            "Install it with: python -m pip install xgboost"
-        ) from exc
+    """Create model pipelines and search spaces for grouped CV."""
+    # Estimators run single-threaded; the search parallelizes across fits.
+    logistic = make_classifier("Logistic Regression", random_state)
+    forest = make_classifier("Random Forest", random_state)
+    xgb = make_classifier("XGBoost", random_state)
 
-    logistic = LogisticRegression(
-        solver="liblinear",
-        max_iter=1000,
-        random_state=random_state,
-    )
-    forest = RandomForestClassifier(
-        n_estimators=100,
-        class_weight="balanced_subsample",
-        n_jobs=-1,
-        random_state=random_state,
-    )
-    xgb = XGBClassifier(
-        n_estimators=100,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric="logloss",
-        tree_method="hist",
-        n_jobs=4,
-        random_state=random_state,
-    )
-
+    # Search spaces follow Table 3 of the proposal: regularization strength and
+    # type plus class weights (LR); number of trees, depth, leaf size and class
+    # weights (RF); learning rate, number of trees, depth, subsampling and
+    # positive-class weight (XGBoost).
     candidates: list[tuple[str, Pipeline, list[dict[str, list[Any]]]]] = []
     model_specs = [
         (
             "Logistic Regression",
             logistic,
             {
-                "classifier__C": [1.0],
+                "classifier__C": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0],
                 "classifier__penalty": ["l1", "l2"],
                 "classifier__class_weight": [None, "balanced"],
             },
-            True,
+            NEEDS_SCALING["Logistic Regression"],
         ),
         (
             "Random Forest",
             forest,
             {
-                "classifier__max_depth": [None, 16],
-                "classifier__min_samples_leaf": [2],
+                "classifier__n_estimators": [100, 200, 300],
+                "classifier__max_depth": [8, 12, 16, None],
+                "classifier__min_samples_leaf": [1, 5, 10, 20],
+                "classifier__max_features": ["sqrt", 0.3],
+                "classifier__class_weight": [None, "balanced_subsample"],
             },
-            False,
+            NEEDS_SCALING["Random Forest"],
         ),
         (
             "XGBoost",
             xgb,
             {
-                "classifier__max_depth": [3, 5],
-                "classifier__learning_rate": [0.1],
+                "classifier__n_estimators": [100, 200, 300, 500],
+                "classifier__learning_rate": [0.03, 0.05, 0.1],
+                "classifier__max_depth": [3, 4, 5, 6],
+                "classifier__subsample": [0.7, 0.8, 1.0],
+                "classifier__colsample_bytree": [0.6, 0.8, 1.0],
+                "classifier__min_child_weight": [1, 5, 10],
                 "classifier__scale_pos_weight": [1.0, positive_weight],
             },
-            False,
+            NEEDS_SCALING["XGBoost"],
         ),
     ]
 
@@ -224,10 +256,13 @@ def _fit_search(
     n_splits: int,
     random_state: int,
     n_jobs: int,
-) -> GridSearchCV:
-    search = GridSearchCV(
+) -> RandomizedSearchCV:
+    grid_size = int(np.prod([len(values) for values in param_grid[0].values()]))
+    search = RandomizedSearchCV(
         estimator=estimator,
-        param_grid=param_grid,
+        param_distributions=param_grid,
+        n_iter=min(N_ITER, grid_size),
+        random_state=random_state,
         scoring="average_precision",
         cv=_make_cv(n_splits, random_state),
         n_jobs=n_jobs,
@@ -448,7 +483,7 @@ def run_evaluation(
     input_path: str | Path,
     output_dir: str | Path,
     test_size: float = 0.20,
-    n_splits: int = 3,
+    n_splits: int = 5,
     random_state: int = 42,
     n_jobs: int = -1,
     include_smote: bool = False,
@@ -556,14 +591,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
-        default=str(Path("preprocesing and evaluation") / "diabetic_data.csv"),
+        default=str(Path("preprocessing and evaluation") / "diabetic_data.csv"),
     )
     parser.add_argument(
         "--output-dir",
-        default=str(Path("preprocesing and evaluation") / "evaluation"),
+        default=str(Path("preprocessing and evaluation") / "evaluation"),
     )
     parser.add_argument("--test-size", type=float, default=0.20)
-    parser.add_argument("--folds", type=int, default=3)
+    parser.add_argument(
+        "--folds",
+        type=int,
+        default=5,
+        help="Patient-grouped CV folds for tuning and threshold selection (default: 5).",
+    )
+    parser.add_argument(
+        "--n-iter",
+        type=int,
+        default=N_ITER,
+        help=f"Randomized-search candidates per model (default: {N_ITER}).",
+    )
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--jobs", type=int, default=-1)
     parser.add_argument(
@@ -575,7 +621,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    global N_ITER
     args = parse_args(argv)
+    N_ITER = args.n_iter
     run_evaluation(
         input_path=args.input,
         output_dir=args.output_dir,

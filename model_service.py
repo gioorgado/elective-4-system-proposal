@@ -12,10 +12,9 @@ import pandas as pd
 import streamlit as st
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
-from xgboost import XGBClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-PREPROCESSING_DIRECTORY = PROJECT_ROOT / "preprocesing and evaluation"
+PREPROCESSING_DIRECTORY = PROJECT_ROOT / "preprocessing and evaluation"
 if str(PREPROCESSING_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(PREPROCESSING_DIRECTORY))
 
@@ -28,13 +27,18 @@ from data_preparation import (
     load_data,
     prepare_data,
 )
+from model_evaluation import NEEDS_SCALING, make_classifier
 
 DEFAULT_DATASET_PATH = PREPROCESSING_DIRECTORY / "diabetic_data.csv"
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "xgboost_readmission.joblib"
+DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "readmission_model.joblib"
 METRICS_PATH = PREPROCESSING_DIRECTORY / "evaluation" / "model_metrics.csv"
-SELECTED_MODEL = "XGBoost"
-SELECTED_THRESHOLD = 0.1365741342306137
+# Used only when model_metrics.csv is unavailable. Normally the deployed model,
+# its hyperparameters and its threshold come from the latest evaluation run.
+FALLBACK_MODEL = "XGBoost"
+FALLBACK_THRESHOLD = 0.5
 RANDOM_STATE = 42
+SMOTE_SUFFIX = " + SMOTE"
+SHAP_BACKGROUND_SIZE = 200
 
 ADMISSION_TYPE_LABELS = {
     "1": "Emergency",
@@ -117,7 +121,7 @@ def load_metrics(metrics_path: str) -> pd.DataFrame:
     path = Path(metrics_path)
     if not path.is_file():
         raise FileNotFoundError(f"Model metrics file not found: {path}")
-    return pd.read_csv(path)
+    return pd.read_csv(path, keep_default_na=False, na_values=[""])
 
 
 def _training_data(dataset_path: str) -> tuple[pd.DataFrame, pd.Series]:
@@ -154,60 +158,98 @@ def _training_defaults(features: pd.DataFrame) -> dict[str, Any]:
     return defaults
 
 
+def select_best_model(metrics: pd.DataFrame) -> pd.Series:
+    """Return the evaluation row with the highest nested-CV validation F1.
+
+    Selection uses validation F1, never test metrics, so the held-out test set
+    stays an unbiased estimate for the chosen model.
+    """
+    if metrics.empty:
+        raise ValueError("The model metrics file has no rows.")
+    ranked = metrics.sort_values("validation_f1", ascending=False, kind="stable")
+    return ranked.iloc[0]
+
+
+def _build_pipeline(
+    model_name: str,
+    params: dict[str, Any],
+    x_train: pd.DataFrame,
+) -> Pipeline:
+    """Rebuild the evaluated pipeline for one model with its tuned parameters."""
+    base_name = model_name.removesuffix(SMOTE_SUFFIX)
+    classifier = make_classifier(base_name, RANDOM_STATE, n_jobs=-1)
+    classifier.set_params(**params)
+    preprocessor = build_preprocessor(
+        x_train, scale_continuous=NEEDS_SCALING[base_name]
+    )
+    if model_name.endswith(SMOTE_SUFFIX):
+        from imblearn.over_sampling import SMOTE
+        from imblearn.pipeline import Pipeline as ImbalancedPipeline
+
+        return ImbalancedPipeline(
+            steps=[
+                ("preprocessor", preprocessor),
+                ("sampler", SMOTE(random_state=RANDOM_STATE)),
+                ("classifier", classifier),
+            ]
+        )
+    return Pipeline(
+        steps=[("preprocessor", preprocessor), ("classifier", classifier)]
+    )
+
+
 def train_selected_model(
     dataset_path: str = str(DEFAULT_DATASET_PATH),
     model_path: str = str(DEFAULT_MODEL_PATH),
+    metrics_path: str = str(METRICS_PATH),
 ) -> dict[str, Any]:
-    """Fit the selected XGBoost model on the grouped training partition."""
-    try:
-        import ast
+    """Fit the best-evaluated model on the grouped training partition.
 
-        metrics = load_metrics(str(METRICS_PATH))
-        selected = metrics.loc[metrics["model"] == SELECTED_MODEL]
-        if selected.empty:
-            raise ValueError(f"No metrics row found for {SELECTED_MODEL}.")
-        best_params = ast.literal_eval(selected.iloc[0]["best_parameters"])
-        estimator_params = {
+    The model type, hyperparameters and decision threshold all come from the
+    evaluation run's model_metrics.csv, so the app serves whichever model the
+    comparison selected.
+    """
+    import ast
+
+    model_name = FALLBACK_MODEL
+    params: dict[str, Any] = {}
+    threshold = FALLBACK_THRESHOLD
+    selected: pd.Series | None = None
+    if Path(metrics_path).is_file():
+        selected = select_best_model(pd.read_csv(metrics_path))
+        model_name = str(selected["model"])
+        params = {
             key.removeprefix("classifier__"): value
-            for key, value in best_params.items()
+            for key, value in ast.literal_eval(selected["best_parameters"]).items()
         }
-    except FileNotFoundError:
-        estimator_params = {
-            "learning_rate": 0.1,
-            "max_depth": 5,
-            "scale_pos_weight": 1.0,
-        }
+        threshold = float(selected["threshold_from_training_oof"])
 
     x_train, y_train = _training_data(dataset_path)
-    pipeline = Pipeline(
-        steps=[
-            ("preprocessor", build_preprocessor(x_train, scale_continuous=False)),
-            (
-                "classifier",
-                XGBClassifier(
-                    n_estimators=100,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
-                    eval_metric="logloss",
-                    tree_method="hist",
-                    n_jobs=4,
-                    random_state=RANDOM_STATE,
-                    **estimator_params,
-                ),
-            ),
-        ]
-    )
+    pipeline = _build_pipeline(model_name, params, x_train)
     pipeline.fit(x_train, y_train)
+
+    # A small transformed training sample: LinearExplainer needs background
+    # data, and storing it keeps explanations independent of the dataset file.
+    background = pipeline.named_steps["preprocessor"].transform(
+        x_train.sample(
+            n=min(SHAP_BACKGROUND_SIZE, len(x_train)), random_state=RANDOM_STATE
+        )
+    )
+    if hasattr(background, "toarray"):
+        background = background.toarray()
 
     bundle: dict[str, Any] = {
         "pipeline": pipeline,
-        "threshold": SELECTED_THRESHOLD,
-        "model_name": SELECTED_MODEL,
+        "threshold": threshold,
+        "model_name": model_name,
+        "selection_metric": "validation_f1",
+        "validation_f1": None if selected is None else float(selected["validation_f1"]),
         "feature_columns": list(x_train.columns),
         "feature_defaults": _training_defaults(x_train),
         "training_rows": len(x_train),
         "training_positive_rate": float(y_train.mean()),
         "dataset_path": str(Path(dataset_path).resolve()),
+        "shap_background": np.asarray(background),
     }
 
     destination = Path(model_path)
@@ -380,6 +422,49 @@ def explain_factor_names(
     return results
 
 
+def make_explainer(bundle: dict[str, Any]) -> Any:
+    """Return a SHAP explainer suited to the deployed model type.
+
+    Tree models (Random Forest, XGBoost) use TreeExplainer; Logistic Regression
+    uses LinearExplainer against the stored training background sample.
+    """
+    import shap
+
+    classifier = bundle["pipeline"].named_steps["classifier"]
+    if hasattr(classifier, "coef_"):
+        return shap.LinearExplainer(classifier, bundle["shap_background"])
+    return shap.TreeExplainer(classifier)
+
+
+def _is_xgboost(classifier: Any) -> bool:
+    return type(classifier).__module__.startswith("xgboost")
+
+
+def _to_dense(matrix: Any) -> np.ndarray:
+    return np.asarray(matrix.toarray() if hasattr(matrix, "toarray") else matrix)
+
+
+def _shap_values(bundle: dict[str, Any], transformed: Any) -> tuple[np.ndarray, float]:
+    """Positive-class SHAP values and base value for preprocessed rows.
+
+    XGBoost treats the unstored entries of a sparse matrix as *missing*, not 0,
+    so its input must stay exactly as the preprocessor produced it; densifying
+    would explain different inputs than the model scored. scikit-learn models
+    treat those entries as 0, so they are densified (as SHAP requires for them).
+    """
+    explainer = make_explainer(bundle)
+    if not _is_xgboost(bundle["pipeline"].named_steps["classifier"]):
+        transformed = _to_dense(transformed)
+    values = explainer.shap_values(transformed)
+    base_value = np.asarray(explainer.expected_value).reshape(-1)
+    if isinstance(values, list):
+        return np.asarray(values[1]), float(base_value[1])
+    values = np.asarray(values)
+    if values.ndim == 3:
+        return values[:, :, 1], float(base_value[1])
+    return values, float(base_value[-1])
+
+
 def explain_local(
     bundle: dict[str, Any],
     feature_row: pd.DataFrame,
@@ -387,31 +472,14 @@ def explain_local(
     """Build a SHAP Explanation for the positive (30-day readmission) class."""
     import shap
 
-    pipeline = bundle["pipeline"]
-    preprocessor = pipeline.named_steps["preprocessor"]
-    classifier = pipeline.named_steps["classifier"]
+    preprocessor = bundle["pipeline"].named_steps["preprocessor"]
     transformed = preprocessor.transform(feature_row)
-    if hasattr(transformed, "toarray"):
-        transformed = transformed.toarray()
-    feature_names = preprocessor.get_feature_names_out()
-
-    explainer = shap.TreeExplainer(classifier)
-    values = explainer.shap_values(transformed)
-    base_value = explainer.expected_value
-    if isinstance(values, list):
-        values = values[1]
-        base_value = np.asarray(base_value).reshape(-1)[1]
-    elif np.asarray(values).ndim == 3:
-        values = np.asarray(values)[:, :, 1]
-        base_value = np.asarray(base_value).reshape(-1)[1]
-    else:
-        base_value = np.asarray(base_value).reshape(-1)[0]
-
+    values, base_value = _shap_values(bundle, transformed)
     return shap.Explanation(
-        values=np.asarray(values)[0],
-        base_values=float(base_value),
-        data=np.asarray(transformed)[0],
-        feature_names=feature_names,
+        values=values[0],
+        base_values=base_value,
+        data=_to_dense(transformed)[0],
+        feature_names=preprocessor.get_feature_names_out(),
     )
 
 
@@ -428,19 +496,144 @@ def explain_global(
         random_state=RANDOM_STATE,
     )
     preprocessor = bundle["pipeline"].named_steps["preprocessor"]
-    classifier = bundle["pipeline"].named_steps["classifier"]
     transformed = preprocessor.transform(sample)
-    if hasattr(transformed, "toarray"):
-        transformed = transformed.toarray()
-    explainer = shap.TreeExplainer(classifier)
-    values = explainer.shap_values(transformed)
-    if isinstance(values, list):
-        values = values[1]
-    elif np.asarray(values).ndim == 3:
-        values = np.asarray(values)[:, :, 1]
+    values, base_value = _shap_values(bundle, transformed)
     return shap.Explanation(
-        values=np.asarray(values),
-        base_values=np.full(len(sample), float(np.asarray(explainer.expected_value).reshape(-1)[-1])),
-        data=np.asarray(transformed),
+        values=values,
+        base_values=np.full(len(sample), base_value),
+        data=_to_dense(transformed),
         feature_names=preprocessor.get_feature_names_out(),
     )
+
+
+# --- Cohort summaries (used by the Risk assessment page) ---
+
+COHORT_GROUPS = {
+    "Age group": ("age", None),
+    "Primary diagnosis group": ("diag_1_category", DIAGNOSIS_GROUP_LABELS),
+    "Admission category": ("admission_type_id", ADMISSION_TYPE_LABELS),
+    "Discharge destination": (
+        "discharge_disposition_id",
+        DISCHARGE_DESTINATION_LABELS,
+    ),
+    "Source of admission": ("admission_source_id", ADMISSION_SOURCE_LABELS),
+    "Length of stay": ("time_in_hospital", None),
+    "Prior-year inpatient admissions": ("number_inpatient", None),
+    "Prior-year emergency visits": ("number_emergency", None),
+    "Total prior-year visits": ("total_prior_visits", None),
+    "Insulin treatment": (
+        "insulin",
+        {
+            "No": "Not prescribed",
+            "Steady": "Prescribed; no dose change",
+            "Up": "Dose increased",
+            "Down": "Dose decreased",
+            "Yes": "Prescribed; change not specified",
+        },
+    ),
+}
+
+COHORT_GROUP_BINS = {
+    "Length of stay": (
+        [-float("inf"), 2, 5, float("inf")],
+        ["1-2 days", "3-5 days", "6+ days"],
+    ),
+    "Prior-year inpatient admissions": (
+        [-float("inf"), 0, 1, float("inf")],
+        ["0", "1", "2+"],
+    ),
+    "Prior-year emergency visits": (
+        [-float("inf"), 0, 1, float("inf")],
+        ["0", "1", "2+"],
+    ),
+    "Total prior-year visits": (
+        [-float("inf"), 0, 2, 5, float("inf")],
+        ["0", "1-2", "3-5", "6+"],
+    ),
+}
+
+VISUALIZATION_OPTIONS = [
+    "Readmission rate",
+    "Encounter volume",
+    "Outcome counts",
+    "Outcome proportions",
+    "Encounter mix (donut)",
+    "Readmission rate trend (line)",
+]
+TREND_GROUPS = {"Age group", *COHORT_GROUP_BINS}
+DEFAULT_VISUALIZATIONS = ["Readmission rate", "Encounter volume"]
+NO_SECOND_VISUALIZATION = "None"
+
+
+def available_visualizations(group_name: str) -> list[str]:
+    """Keep the line chart available only when categories have a natural order."""
+    return [
+        option
+        for option in VISUALIZATION_OPTIONS
+        if option != "Readmission rate trend (line)" or group_name in TREND_GROUPS
+    ]
+
+
+def selected_visualizations(first: str, second: str) -> list[str]:
+    """Return one or two selected chart views without duplicates."""
+    return [first] if second == NO_SECOND_VISUALIZATION else [first, second]
+
+
+def _age_label(value: str) -> str:
+    """Turn source age bands into clinician-readable ranges."""
+    try:
+        lower, upper = value.strip("[]()").split("-")
+        return f"{lower}-{int(upper) - 1} years"
+    except (ValueError, AttributeError):
+        return value
+
+
+def summarize_cohort(cohort: pd.DataFrame, group_name: str) -> pd.DataFrame:
+    """Aggregate encounters and readmission outcomes for one cohort grouping."""
+    if group_name not in COHORT_GROUPS:
+        raise ValueError(f"Unknown cohort grouping: {group_name}")
+
+    column, labels = COHORT_GROUPS[group_name]
+    if group_name in COHORT_GROUP_BINS:
+        bins, bin_labels = COHORT_GROUP_BINS[group_name]
+        groups = pd.cut(
+            pd.to_numeric(cohort[column], errors="coerce"),
+            bins=bins,
+            labels=bin_labels,
+        ).astype("string")
+    else:
+        groups = cohort[column].astype("string").fillna("Missing")
+    if labels is not None:
+        groups = groups.map(labels).fillna(groups)
+    elif column == "age":
+        groups = groups.map(_age_label)
+    groups = groups.fillna("Not recorded").replace("Missing", "Not recorded")
+
+    grouped = cohort.assign(cohort_group=groups)
+    summary = (
+        grouped.groupby("cohort_group", observed=True)["readmitted_30d"]
+        .agg(encounters="size", readmissions="sum", readmission_rate="mean")
+        .reset_index()
+        .rename(columns={"cohort_group": "group"})
+    )
+
+    if column == "age":
+        age_order = [_age_label(value) for value in AGE_CATEGORIES]
+        summary["group"] = pd.Categorical(
+            summary["group"], categories=age_order, ordered=True
+        )
+        summary = summary.sort_values("group")
+        summary["group"] = summary["group"].astype(str)
+    elif group_name in COHORT_GROUP_BINS:
+        summary["group"] = pd.Categorical(
+            summary["group"],
+            categories=COHORT_GROUP_BINS[group_name][1],
+            ordered=True,
+        )
+        summary = summary.sort_values("group")
+        summary["group"] = summary["group"].astype(str)
+    else:
+        summary = summary.sort_values("readmission_rate", ascending=False)
+
+    summary["not_readmitted"] = summary["encounters"] - summary["readmissions"]
+    return summary.reset_index(drop=True)
